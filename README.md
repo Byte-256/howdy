@@ -53,12 +53,14 @@ Details that differ from the dlib path:
 - Backend init performs a **warmup forward pass**, because some backends only fail on first inference. Broken backends fall back to the CPU with a printed warning (for example, Vulkan is incomplete in OpenCV 4.13 as packaged by Fedora and never engages; it stays selectable for other distros).
 - Before any OpenCL use, the process sets `OPENCV_DNN_OPENCL_ALLOW_ALL_DEVICES=1` and `RUSTICL_ENABLE=radeonsi`, so AMD GPUs exposed through Mesa's Rusticl (which reports a non-GPU device type and is hidden by default in Fedora's Mesa) actually run the networks. Works as root, i.e. in the real PAM path.
 
-The model files are not downloaded by the build. After installing, run:
+The model files are not downloaded by a source build. After installing from source, run:
 
 ```sh
 cd /usr/share/howdy-dnn   # or the configured dnn_data_dir
 sudo ./install.sh
 ```
+
+(Pre-built release rpms ship the models already — no download needed.)
 
 ### 2. Guided multi-pose enrollment (`cli/add.py`)
 
@@ -86,29 +88,21 @@ The same prompt-driven loop is used by the dlib pipeline, where it also fixes an
 
 ## Installation
 
-### Quick install (all-in-one release, any distro)
+### Quick install (pre-built release for Fedora)
 
-This fork publishes a portable **all-in-one** release: a self-contained Python runtime, the Python dependencies (OpenCV + NumPy), the compiled `pam_howdy.so` (statically linked C++ runtime, bundled support libraries) and the default DNN config, all in one tarball. The face recognition models are downloaded automatically on first run/install — nothing else is needed from your distro's package manager.
+The [releases page](https://github.com/Byte-256/howdy/releases) publishes a pre-built **rpm** for Fedora that includes everything out of the box (all-in-one): the compiled PAM module + CLI, the YuNet/SFace recognition models **shipped inside the package** (no first-run downloads), a default `config.ini` with hardware acceleration (`use_dnn = true`) and the same system layout as the COPR package it replaces:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Byte-256/howdy/master/install.sh -o install-howdy.sh
-sudo bash install-howdy.sh
+# download the rpm for your architecture from the latest release and install:
+curl -fLO https://github.com/Byte-256/howdy/releases/download/v3.1.0-fork.1/howdy-3.1.0-1.fc44.x86_64.rpm
+sudo dnf install ./howdy-3.1.0-1.fc44.x86_64.rpm
 ```
 
-(or in one line: `curl -fsSL .../install.sh | sudo bash -s --` — the piped form cannot prompt, so it leaves `/etc/pam.d` untouched for manual wiring; pass `--yes` to have it wire `pam_howdy` into `sudo`/`gdm`-style PAM files automatically.)
+(`dnf` resolves the runtime dependencies — `python3-opencv`, `python3-numpy` — automatically; `mesa-libOpenCL` is recommended for the OpenCL GPU backend and `python3-dlib` if you want the legacy dlib pipeline.)
 
-What it installs:
+Next steps after install: `sudo howdy config` (set `device_path`, e.g. `/dev/video0`), then `sudo howdy add` for guided multi-pose enrollment. The post-install flow (downloading the two onnx models) is only needed when installing from source without this rpm — run `sudo /usr/share/howdy-dnn/install.sh` then.
 
-| What | Where |
-|---|---|
-| `pam_howdy.so` (+ bundled libs) | `/usr/lib[64]/security/` (auto-detected) |
-| `howdy` CLI + Python runtime | `/usr/local/bin/howdy`, `/opt/howdy/` |
-| Config + face models | `/etc/howdy/` (existing config/models are never overwritten) |
-| DNN models | `/opt/howdy/data/dnn-data/` (auto-downloaded during install) |
-
-Next steps after install: `sudo howdy config` (set `device_path`), then `sudo howdy add` for guided multi-pose enrollment. Re-running the script updates files in place; `uninstall` inside the tarball removes everything (keeps `/etc/howdy`). Supported architectures: `x86_64` and `aarch64`; the bundles are built in GitHub Actions on Ubuntu 22.04 (glibc ≥ 2.35 target).
-
-Limitations of the AIO package (vs. a distro/package install): no `howdy-gtk` GUI (headless auth only, use the CLI), `howdy test`'s live camera window is unavailable (headless OpenCV), and dlib is not bundled (the DNN pipeline is the default there — set `use_dnn = false` only after installing dlib yourself).
+An experimental all-in-one **portable tarball** (bundled Python runtime + OpenCV, no distro dependencies, for other distributions) is also supported by `scripts/build-aio.sh` + the root `install.sh` bootstrap; assets are built on demand and may appear on the releases page alongside the rpm.
 
 ### From source
 
@@ -236,6 +230,23 @@ Note: face models enrolled with dlib are not compatible with this pipeline. Afte
 `howdy add` does not use a single frame anymore: it first captures your face from the front and then asks you to turn your head left, right, up and down, storing separate encodings for every head pose in a single model. This makes recognition work even when your head isn't perfectly aligned at login.
 
 The extra poses can be disabled with `add_poses = false` in the `[core]` config section, and the turn/tilt sensitivity can be tuned with the `MIN_TURN` and `MIN_TILT` constants in `cli/add.py`.
+
+## Credits and model licenses
+
+Howdy is a fork of [boltgolt/howdy](https://github.com/boltgolt/howdy) (MIT license).
+
+The hardware accelerated pipeline bundles the recognition models so no download is needed at runtime:
+
+| Model | Role | License | Author(s) |
+|---|---|---|---|
+| [YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) (`face_detection_yunet_2023mar.onnx`) | face detection | MIT | Shiqi Yu (bi) via [OpenCV Zoo](https://github.com/opencv/opencv_zoo) |
+| [SFace](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface) (`face_recognition_sface_2021dec.onnx`) | face recognition | Apache-2.0 | OpenCV / OpenCV Zoo |
+
+Both licenses are permissive and allow redistribution; the full license texts are in `howdy/src/dnn-data/Readme.md` and in the opencv_zoo repository.
+
+The optional dlib pipeline downloads (via `dlib-data/install.sh`) three models by Davis King from [dlib-models](https://github.com/davisking/dlib-models) (the ResNet face recognizer, the CNN face detector and the 5-point landmark model). The author released them into the public domain; the 68-point landmark model is intentionally **not** used because its training dataset (iBUG 300-W) excludes commercial use.
+
+It also relies on [OpenCV](https://opencv.org) (Apache-2.0) and [dlib](https://dlib.net) (Boost). Windows Hello™ is a trademark of Microsoft — howdy is not affiliated with Microsoft.
 
 ## CLI
 

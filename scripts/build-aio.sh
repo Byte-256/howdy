@@ -51,9 +51,11 @@ case "$MODE" in
 	# Debian/Ubuntu only - this is what the CI workflow and local container use
 	apt-get update
 	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-		git build-essential meson ninja-build pkg-config patchelf ca-certificates \
+		git build-essential ninja-build pkg-config patchelf ca-certificates \
 		curl tar gzip coreutils libpam0g-dev libevdev-dev libinih-dev python3-dev \
-		locales
+		python3-pip locales
+	# apt meson (0.61) is too old for the project; use a recent one via pip
+	pip3 install --quiet meson
 	locale-gen en_US.UTF-8 || true
 	exit 0
 	;;

@@ -14,3 +14,18 @@ official OpenCV Zoo:
   <https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface>
 
 Run `./install.sh` in this directory as root to download them.
+
+## Model credits and licenses
+
+Both models come from [OpenCV Zoo](https://github.com/opencv/opencv_zoo)
+(model hosting has since moved to OpenCV's Hugging Face page,
+<https://huggingface.co/opencv>). They are redistributed here / shipped in
+the release packages as permitted by their licenses:
+
+- **YuNet** face detector - MIT License, Copyright (c) 2020 Shiqi Yu
+  ([model license](https://github.com/opencv/opencv_zoo/blob/main/models/face_detection_yunet/LICENSE))
+- **SFace** face recognizer - Apache License 2.0, OpenCV / OpenCV Zoo
+  ([model license](https://github.com/opencv/opencv_zoo/blob/main/models/face_recognition_sface/LICENSE))
+
+Thanks to the respective authors and to the OpenCV maintainers for the
+OpenCV Zoo collection.
