@@ -31,5 +31,6 @@ shared_library(
 	install: true,
 	install_dir: pamdir,
 	install_tag: 'pam_module',
-	name_prefix: ''
+	name_prefix: '',
+	install_rpath: get_option('pam_rpath'),
 )

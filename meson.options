@@ -1,4 +1,5 @@
 option('pam_dir', type: 'string', value: '', description: 'Set the pam_howdy destination directory')
+option('pam_rpath', type: 'string', value: '', description: 'Set an install rpath on pam_howdy (used by AIO builds to find bundled libs)')
 #option('fetch_dlib_data', type: 'boolean', value: false, description: 'Download dlib data files')
 option('config_dir', type: 'string', value: '', description: 'Set the howdy config directory')
 option('dlib_data_dir', type: 'string', value: '', description: 'Set the dlib data directory')

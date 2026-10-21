@@ -86,7 +86,33 @@ The same prompt-driven loop is used by the dlib pipeline, where it also fixes an
 
 ## Installation
 
-Howdy is currently available and packaged for Debian/Ubuntu, Arch Linux, Fedora and openSUSE. If you’re interested in packaging Howdy for your distro, don’t hesitate to open an issue.
+### Quick install (all-in-one release, any distro)
+
+This fork publishes a portable **all-in-one** release: a self-contained Python runtime, the Python dependencies (OpenCV + NumPy), the compiled `pam_howdy.so` (statically linked C++ runtime, bundled support libraries) and the default DNN config, all in one tarball. The face recognition models are downloaded automatically on first run/install — nothing else is needed from your distro's package manager.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Byte-256/howdy/master/install.sh -o install-howdy.sh
+sudo bash install-howdy.sh
+```
+
+(or in one line: `curl -fsSL .../install.sh | sudo bash -s --` — the piped form cannot prompt, so it leaves `/etc/pam.d` untouched for manual wiring; pass `--yes` to have it wire `pam_howdy` into `sudo`/`gdm`-style PAM files automatically.)
+
+What it installs:
+
+| What | Where |
+|---|---|
+| `pam_howdy.so` (+ bundled libs) | `/usr/lib[64]/security/` (auto-detected) |
+| `howdy` CLI + Python runtime | `/usr/local/bin/howdy`, `/opt/howdy/` |
+| Config + face models | `/etc/howdy/` (existing config/models are never overwritten) |
+| DNN models | `/opt/howdy/data/dnn-data/` (auto-downloaded during install) |
+
+Next steps after install: `sudo howdy config` (set `device_path`), then `sudo howdy add` for guided multi-pose enrollment. Re-running the script updates files in place; `uninstall` inside the tarball removes everything (keeps `/etc/howdy`). Supported architectures: `x86_64` and `aarch64`; the bundles are built in GitHub Actions on Ubuntu 22.04 (glibc ≥ 2.35 target).
+
+Limitations of the AIO package (vs. a distro/package install): no `howdy-gtk` GUI (headless auth only, use the CLI), `howdy test`'s live camera window is unavailable (headless OpenCV), and dlib is not bundled (the DNN pipeline is the default there — set `use_dnn = false` only after installing dlib yourself).
+
+### From source
+
+Howdy is currently available and packaged for Debian/Ubuntu, Arch Linux, Fedora and openSUSE. If you're interested in packaging Howdy for your distro, don't hesitate to open an issue.
 
 **Note:** The build of dlib can hang on 100% for over a minute, give it time.
 
