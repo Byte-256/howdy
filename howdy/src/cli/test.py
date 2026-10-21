@@ -7,7 +7,6 @@ import os
 import json
 import sys
 import time
-import dlib
 import cv2
 import numpy as np
 import paths_factory
@@ -18,6 +17,16 @@ from recorders.video_capture import VideoCapture
 # Read config from disk
 config = configparser.ConfigParser()
 config.read(paths_factory.config_file_path())
+
+# Read the detection method out of the config, models are only compatible
+# with the method they were generated with
+use_cnn = config.getboolean('core', 'use_cnn', fallback=False)
+use_dnn = config.getboolean('core', 'use_dnn', fallback=False)
+dnn_certainty = config.getfloat('core', 'dnn_certainty', fallback=0.637)
+method = "sface" if use_dnn else "dlib"
+# Only import dlib when the DNN pipeline is not in use
+if not use_dnn:
+	import dlib
 
 if config.get("video", "recording_plugin", fallback="opencv") != "opencv":
 	print(_("Howdy has been configured to use a recorder which doesn't support the test command yet, aborting"))
@@ -53,17 +62,36 @@ def print_text(line_number, text):
 	cv2.putText(overlay, text, (10, height - 10 - (10 * line_number)), cv2.FONT_HERSHEY_SIMPLEX, .3, (0, 255, 0), 0, cv2.LINE_AA)
 
 
-use_cnn = config.getboolean('core', 'use_cnn', fallback=False)
+dnn_face_recognizer = None
+if use_dnn:
+	# Use OpenCV's DNN models (YuNet detector + SFace recognizer), these can
+	# be hardware accelerated on the GPU
+	import dnn_recognition
 
-if use_cnn:
-	face_detector = dlib.cnn_face_detection_model_v1(
-		paths_factory.mmod_human_face_detector_path()
-	)
+	try:
+		dnn_face_recognizer = dnn_recognition.DnnFaceRecognizer(config)
+	except FileNotFoundError:
+		sys.exit(1)
+
+	print(_("Using the OpenCV DNN pipeline ({backend}/{target})").format(backend=dnn_face_recognizer.backend_name, target=dnn_face_recognizer.target_name))
 else:
-	face_detector = dlib.get_frontal_face_detector()
+	# Test if at lest 1 of the data files is there and abort if it's not
+	if not os.path.isfile(paths_factory.shape_predictor_5_face_landmarks_path()):
+		print(_("Data files have not been downloaded, please run the following commands:"))
+		print("\n\tcd " + paths_factory.dlib_data_dir_path())
+		print("\tsudo ./install.sh\n")
+		sys.exit(1)
 
-pose_predictor = dlib.shape_predictor(paths_factory.shape_predictor_5_face_landmarks_path())
-face_encoder = dlib.face_recognition_model_v1(paths_factory.dlib_face_recognition_resnet_model_v1_path())
+	# Use the CNN detector if enabled
+	if use_cnn:
+		face_detector = dlib.cnn_face_detection_model_v1(
+			paths_factory.mmod_human_face_detector_path()
+		)
+	else:
+		face_detector = dlib.get_frontal_face_detector()
+
+	pose_predictor = dlib.shape_predictor(paths_factory.shape_predictor_5_face_landmarks_path())
+	face_encoder = dlib.face_recognition_model_v1(paths_factory.dlib_face_recognition_resnet_model_v1_path())
 
 encodings = []
 models = None
@@ -72,8 +100,23 @@ try:
 	user = builtins.howdy_user
 	models = json.load(open(paths_factory.user_model_path(user)))
 
-	for model in models:
+	# Only use models created with the current detection method
+	models = [model for model in models if model.get("type", "dlib") == method]
+
+	encodings = []
+	model_indexes = []
+	for model_index, model in enumerate(models):
 		encodings += model["data"]
+		# Map every encoding row back to the model it came from, match
+		# indexes from the encoding matrix are indexes into this list
+		model_indexes += [model_index] * len(model["data"])
+
+	# The DNN encodings are matched with the cosine distance, make sure
+	# all stored encodings are unit normalized
+	if use_dnn and len(encodings) > 0:
+		encodings = np.array(encodings)
+		norms = np.linalg.norm(encodings, axis=1, keepdims=True)
+		encodings = (encodings / np.maximum(norms, 1e-6)).tolist()
 except FileNotFoundError:
 	pass
 
@@ -166,46 +209,67 @@ try:
 
 			# Get the locations of all faces and their locations
 			# Upsample it once
-			face_locations = face_detector(frame, 1)
+			if use_dnn:
+				face_locations = dnn_face_recognizer.detect(orig_frame, frame)
+			else:
+				face_locations = face_detector(frame, 1)
 			rec_tm = time.time() - rec_tm
 
 			# Loop though all faces and paint a circle around them
 			for loc in face_locations:
-				if use_cnn:
-					loc = loc.rect
+				if use_dnn:
+					# Get the center X and Y from the box returned by
+					# the DNN detector
+					x = int(loc[0] + loc[2] / 2)
+					y = int(loc[1] + loc[3] / 2)
+					r = loc[2] / 2
+				else:
+					if use_cnn:
+						loc = loc.rect
+
+					# Get the center X and Y from the rectangular points
+					x = int((loc.right() - loc.left()) / 2) + loc.left()
+					y = int((loc.bottom() - loc.top()) / 2) + loc.top()
+
+					# Get the raduis from the with of the square
+					r = (loc.right() - loc.left()) / 2
+
+				# Add 20% padding
+				r = int(r + (r * 0.2))
 
 				# By default the circle around the face is red for no match
 				color = (0, 0, 230)
 
-				# Get the center X and Y from the rectangular points
-				x = int((loc.right() - loc.left()) / 2) + loc.left()
-				y = int((loc.bottom() - loc.top()) / 2) + loc.top()
-
-				# Get the raduis from the with of the square
-				r = (loc.right() - loc.left()) / 2
-				# Add 20% padding
-				r = int(r + (r * 0.2))
-
 				# If we have models defined for the current user
 				if models:
 					# Get the encoding of the face in the frame
-					face_landmark = pose_predictor(orig_frame, loc)
-					face_encoding = np.array(face_encoder.compute_face_descriptor(orig_frame, face_landmark, 1))
+					if use_dnn:
+						face_encoding = dnn_face_recognizer.encode(orig_frame, loc)
+					else:
+						face_landmark = pose_predictor(orig_frame, loc)
+						face_encoding = np.array(face_encoder.compute_face_descriptor(orig_frame, face_landmark, 1))
 
 					# Match this found face against a known face
-					matches = np.linalg.norm(encodings - face_encoding, axis=1)
+					if use_dnn:
+						# The DNN encodings are unit normalized, match with
+						# the cosine distance so lower is more similar
+						matches = 1 - encodings @ face_encoding
+					else:
+						matches = np.linalg.norm(encodings - face_encoding, axis=1)
 
 					# Get best match
 					match_index = np.argmin(matches)
 					match = matches[match_index]
 
 					# If a model matches
-					if 0 < match < video_certainty:
+					certainty_threshold = dnn_certainty if use_dnn else video_certainty
+					if 0 < match < certainty_threshold:
 						# Turn the circle green
 						color = (0, 230, 0)
 
 						# Print the name of the model next to the circle
-						circle_text = "{} (certainty: {})".format(models[match_index]["label"], round(match * 10, 3))
+						winning_model = models[model_indexes[match_index]]
+						circle_text = "{} (certainty: {})".format(winning_model["label"], round(match * 10, 3))
 						cv2.putText(overlay, circle_text, (int(x + r / 3), y - r), cv2.FONT_HERSHEY_SIMPLEX, .3, (0, 255, 0), 0, cv2.LINE_AA)
 					# If no approved matches, show red text
 					else:

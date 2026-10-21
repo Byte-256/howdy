@@ -22,6 +22,68 @@ Howdy provides Windows Hello™ style authentication for Linux. Use your built-i
 
 Using the central authentication system (PAM), this works everywhere you would otherwise need your password: Login, lock screen, sudo, su, etc.
 
+**NOTE:** This repository is a fork of [boltgolt/howdy](https://github.com/boltgolt/howdy). See [Fork changes vs. upstream](#fork-changes-vs-upstream) for everything that is different here, and keep in mind that upstream troubleshooting guides may not always apply.
+
+## Fork changes vs. upstream
+
+This fork was built for a machine with an **AMD iGPU** (Radeon 610M), where upstream's dlib pipeline cannot use CUDA and is slow on the CPU. The two big changes compared to upstream are hardware accelerated face recognition and guided multi-pose face enrollment. The dlib pipeline upstream ships is still present and remains the default; everything below activates it with `use_dnn = true`.
+
+### 1. Hardware accelerated face recognition (`dnn_recognition.py`, new)
+
+Upstream uses dlib (HOG or CNN detector + ResNet encoder, CPU only). This fork adds a second pipeline built on OpenCV's DNN module using the official [OpenCV Zoo](https://github.com/opencv/opencv_zoo) models:
+
+- **YuNet** (`face_detection_yunet_2023mar.onnx`, 233 KB) — face detector
+- **SFace** (`face_recognition_sface_2021dec.onnx`, 37 MB) — face recognizer
+
+Measured on the target machine (320x240 frame, face in view): the dlib pipeline takes ~49 ms per frame, this pipeline ~17 ms. The networks run on the backend selected in the config:
+
+```ini
+[core]
+use_dnn = true          # switch from dlib to the DNN pipeline
+dnn_backend = opencl    # cpu | opencl (AMD/Intel/NVIDIA) | vulkan (experimental) | cuda
+dnn_target = auto       # auto | cpu | cpu_fp16 | opencl | opencl_fp16 | vulkan | cuda | cuda_fp16
+dnn_certainty = 0.637   # cosine distance threshold used by the DNN pipeline (lower = stricter)
+```
+
+Details that differ from the dlib path:
+
+- Matching uses the **cosine distance** (`1 - dot`) over **unit-normalized encodings**. OpenCV builds SFace features unnormalized; the recognizer normalizes on load so stale or hand-edited models still compare correctly.
+- Every encoding row is mapped back to the model owning it (`model_indexes`); upstream assumed exactly one encoding per model when printing the winning model label, which crashes once a model holds multiple encodings.
+- Models stamp their enrollment method (`"type": "sface"` / `"dlib"`). Authentication filters the model file by the active method, because dlib and SFace encodings are mathematically incompatible — with mismatched models you get a clear re-enroll message instead of silent failure.
+- Backend init performs a **warmup forward pass**, because some backends only fail on first inference. Broken backends fall back to the CPU with a printed warning (for example, Vulkan is incomplete in OpenCV 4.13 as packaged by Fedora and never engages; it stays selectable for other distros).
+- Before any OpenCL use, the process sets `OPENCV_DNN_OPENCL_ALLOW_ALL_DEVICES=1` and `RUSTICL_ENABLE=radeonsi`, so AMD GPUs exposed through Mesa's Rusticl (which reports a non-GPU device type and is hidden by default in Fedora's Mesa) actually run the networks. Works as root, i.e. in the real PAM path.
+
+The model files are not downloaded by the build. After installing, run:
+
+```sh
+cd /usr/share/howdy-dnn   # or the configured dnn_data_dir
+sudo ./install.sh
+```
+
+### 2. Guided multi-pose enrollment (`cli/add.py`)
+
+Upstream's `howdy add` captures a single frontal frame. When DNN mode is on (and `add_poses = true`, the default), a single `howdy add` run now:
+
+1. Captures **3 frontal frames** and averages their landmark geometry into a neutral baseline
+2. Prompts you to turn **left, right, tilt up, tilt down**, capturing up to 3 frames per direction, each gated against that baseline (yaw/pitch normalized by the eye-to-eye distance)
+3. Stores every capture as a separate encoding in the model's `data` list — recognition then works from angles further off-center
+
+Landmark points are derived geometrically per frame (sorted top-to-bottom into eyes / nose / mouth) so the gate works identically for the dlib and YuNet landmark orders, which are not interchangeable. Per-direction steps time out after 10 s and are skipped with a notice — enrollment never aborts because one direction failed. Sensitivity lives in `MIN_TURN` / `MIN_TILT` in `cli/add.py`, disable with `add_poses = false`.
+
+The same prompt-driven loop is used by the dlib pipeline, where it also fixes an `np.ndarray` truthiness bug when YuNet-style results (which return `None` instead of an empty list for "no faces") flow through the multiple-face checks.
+
+### 3. Build and packaging changes
+
+- New meson option `dnn_data_dir` (default `${datadir}/howdy-dnn`) plus the install targets for `dnn-data/`
+- New source files: `howdy/src/dnn_recognition.py`, `howdy/src/dnn-data/{install.sh,Readme.md}`
+- README documents both features and how to enable them
+
+### Compatibility notes
+
+- Existing face models enrolled with dlib remain valid while `use_dnn = false`
+- After enabling `use_dnn`, every user must run `sudo howdy add` again (the prompt-driven capture stores the new SFace encodings alongside old models in the same file, which is safe — only compatible models are loaded)
+- `rubberstamps` (liveness checks) still use dlib; in DNN mode their dlib models are initialized lazily only after a successful recognition, so the fast path is unaffected
+
 ## Installation
 
 Howdy is currently available and packaged for Debian/Ubuntu, Arch Linux, Fedora and openSUSE. If you’re interested in packaging Howdy for your distro, don’t hesitate to open an issue.
@@ -120,6 +182,34 @@ After installation, Howdy needs to learn what you look like so it can recognise 
 If nothing went wrong we should be able to run sudo by just showing your face. Open a new terminal and run `sudo -i` to see it in action. Please check [this wiki page](https://github.com/boltgolt/howdy/wiki/Common-issues) if you're experiencing problems or [search](https://github.com/boltgolt/howdy/issues) for similar issues.
 
 If you're curious you can run `sudo howdy config` to open the central config file and see the options Howdy has to offer. On most systems this will open the nano editor, where you have to press `ctrl`+`x` to save your changes.
+
+## Hardware accelerated face recognition
+
+Howdy can use OpenCV's DNN module (the tiny YuNet detector + SFace recognizer) instead of dlib for face detection and identification. This pipeline is around 3x faster and the networks can run on the GPU, this is configured in the config file:
+
+```ini
+[core]
+use_dnn = true
+dnn_backend = opencl
+dnn_target = auto
+dnn_certainty = 0.637
+```
+
+The models are downloaded separately:
+```sh
+cd /usr/share/howdy-dnn # or the configured data directory
+sudo ./install.sh
+```
+
+Backends: `cpu`, `opencl` (AMD/Intel/NVIDIA GPUs), `vulkan` (experimental) and `cuda` (NVIDIA). If the selected backend doesn't work, Howdy automatically falls back on the CPU.
+
+Note: face models enrolled with dlib are not compatible with this pipeline. After enabling `use_dnn`, every user has to run `sudo howdy add` again.
+
+## Multi-pose enrollment
+
+`howdy add` does not use a single frame anymore: it first captures your face from the front and then asks you to turn your head left, right, up and down, storing separate encodings for every head pose in a single model. This makes recognition work even when your head isn't perfectly aligned at login.
+
+The extra poses can be disabled with `add_poses = false` in the `[core]` config section, and the turn/tilt sensitivity can be tuned with the `MIN_TURN` and `MIN_TILT` constants in `cli/add.py`.
 
 ## CLI
 

@@ -23,6 +23,7 @@ import snapshot
 import numpy as np
 import _thread as thread
 import paths_factory
+import dnn_recognition
 from recorders.video_capture import VideoCapture
 from i18n import _
 
@@ -41,25 +42,34 @@ def exit(code=None):
 
 def init_detector(lock):
 	"""Start face detector, encoder and predictor in a new thread"""
-	global face_detector, pose_predictor, face_encoder
+	global face_detector, pose_predictor, face_encoder, dnn_face_recognizer
 
-	# Test if at lest 1 of the data files is there and abort if it's not
-	if not os.path.isfile(paths_factory.shape_predictor_5_face_landmarks_path()):
-		print(_("Data files have not been downloaded, please run the following commands:"))
-		print("\n\tcd " + paths_factory.dlib_data_dir_path())
-		print("\tsudo ./install.sh\n")
-		lock.release()
-		exit(1)
-
-	# Use the CNN detector if enabled
-	if use_cnn:
-		face_detector = dlib.cnn_face_detection_model_v1(paths_factory.mmod_human_face_detector_path())
+	if use_dnn:
+		# Use OpenCV's DNN models (YuNet detector + SFace recognizer), these
+		# can be hardware accelerated on the GPU
+		try:
+			dnn_face_recognizer = dnn_recognition.DnnFaceRecognizer(config)
+		except FileNotFoundError:
+			lock.release()
+			exit(1)
 	else:
-		face_detector = dlib.get_frontal_face_detector()
+		# Test if at lest 1 of the data files is there and abort if it's not
+		if not os.path.isfile(paths_factory.shape_predictor_5_face_landmarks_path()):
+			print(_("Data files have not been downloaded, please run the following commands:"))
+			print("\n\tcd " + paths_factory.dlib_data_dir_path())
+			print("\tsudo ./install.sh\n")
+			lock.release()
+			exit(1)
 
-	# Start the others regardless
-	pose_predictor = dlib.shape_predictor(paths_factory.shape_predictor_5_face_landmarks_path())
-	face_encoder = dlib.face_recognition_model_v1(paths_factory.dlib_face_recognition_resnet_model_v1_path())
+		# Use the CNN detector if enabled
+		if use_cnn:
+			face_detector = dlib.cnn_face_detection_model_v1(paths_factory.mmod_human_face_detector_path())
+		else:
+			face_detector = dlib.get_frontal_face_detector()
+
+		# Start the others regardless
+		pose_predictor = dlib.shape_predictor(paths_factory.shape_predictor_5_face_landmarks_path())
+		face_encoder = dlib.face_recognition_model_v1(paths_factory.dlib_face_recognition_resnet_model_v1_path())
 
 	# Note the time it took to initialize detectors
 	timings["ll"] = time.time() - timings["ll"]
@@ -120,6 +130,7 @@ lowest_certainty = 10
 face_detector = None
 pose_predictor = None
 face_encoder = None
+dnn_face_recognizer = None
 
 # Try to load the face model from the models folder
 try:
@@ -140,6 +151,8 @@ config.read(paths_factory.config_file_path())
 
 # Get all config values needed
 use_cnn = config.getboolean("core", "use_cnn", fallback=False)
+use_dnn = config.getboolean("core", "use_dnn", fallback=False)
+dnn_certainty = config.getfloat("core", "dnn_certainty", fallback=0.637)
 timeout = config.getint("video", "timeout", fallback=4)
 dark_threshold = config.getfloat("video", "dark_threshold", fallback=50.0)
 video_certainty = config.getfloat("video", "certainty", fallback=3.5) / 10
@@ -148,6 +161,34 @@ save_failed = config.getboolean("snapshots", "save_failed", fallback=False)
 save_successful = config.getboolean("snapshots", "save_successful", fallback=False)
 gtk_stdout = config.getboolean("debug", "gtk_stdout", fallback=False)
 rotate = config.getint("video", "rotate", fallback=0)
+
+# The detection method used, models are only compatible with the method
+# they were generated with
+method = "sface" if use_dnn else "dlib"
+
+# Drop face models that were created with the other detection method
+incompatible = [model for model in models if model.get("type", "dlib") != method]
+models = [model for model in models if model.get("type", "dlib") == method]
+encodings = []
+model_indexes = []
+for model_index, model in enumerate(models):
+	encodings += model["data"]
+	# Map every encoding row back to the model it came from, match
+	# indexes from the encoding matrix are indexes into this list
+	model_indexes += [model_index] * len(model["data"])
+
+# The DNN encodings are matched with the cosine distance, make sure all
+# stored encodings are unit normalized
+if use_dnn and len(encodings) > 0:
+	encodings = np.array(encodings)
+	norms = np.linalg.norm(encodings, axis=1, keepdims=True)
+	encodings = (encodings / np.maximum(norms, 1e-6)).tolist()
+
+# Check if the file still contains a usable model
+if len(models) < 1:
+	if len(incompatible) > 0:
+		print(_("The saved face models are not compatible with the current detection method, please re-add the models with \"sudo howdy add\""))
+	exit(10)
 
 # Send the gtk output to the terminal if enabled in the config
 gtk_pipe = sys.stdout if gtk_stdout else subprocess.DEVNULL
@@ -299,18 +340,32 @@ while True:
 
 	# Get all faces from that frame as encodings
 	# Upsamples 1 time
-	face_locations = face_detector(gsframe, 1)
+	if use_dnn:
+		face_locations = dnn_face_recognizer.detect(frame, gsframe)
+	else:
+		face_locations = face_detector(gsframe, 1)
+
 	# Loop through each face
 	for fl in face_locations:
-		if use_cnn:
-			fl = fl.rect
+		if use_dnn:
+			# Align and crop the face and create an encoding with the
+			# hardware accelerated recognizer
+			face_encoding = dnn_face_recognizer.encode(frame, fl)
+		else:
+			if use_cnn:
+				fl = fl.rect
 
-		# Fetch the faces in the image
-		face_landmark = pose_predictor(frame, fl)
-		face_encoding = np.array(face_encoder.compute_face_descriptor(frame, face_landmark, 1))
+			# Fetch the faces in the image
+			face_landmark = pose_predictor(frame, fl)
+			face_encoding = np.array(face_encoder.compute_face_descriptor(frame, face_landmark, 1))
 
 		# Match this found face against a known face
-		matches = np.linalg.norm(encodings - face_encoding, axis=1)
+		if use_dnn:
+			# The DNN encodings are unit normalized, match with the
+			# cosine distance so lower is more similar
+			matches = 1 - encodings @ face_encoding
+		else:
+			matches = np.linalg.norm(encodings - face_encoding, axis=1)
 
 		# Get best match
 		match_index = np.argmin(matches)
@@ -321,7 +376,8 @@ while True:
 			lowest_certainty = match
 
 		# Check if a match that's confident enough
-		if 0 < match < video_certainty:
+		certainty_threshold = dnn_certainty if use_dnn else video_certainty
+		if 0 < match < certainty_threshold:
 			timings["tt"] = time.time() - timings["st"]
 			timings["fl"] = time.time() - timings["fr"]
 
@@ -353,7 +409,7 @@ while True:
 				print(_("Dark frames ignored: %d ") % (dark_tries, ))
 				print(_("Certainty of winning frame: %.3f") % (match * 10, ))
 
-				print(_("Winning model: %d (\"%s\")") % (match_index, models[match_index]["label"]))
+				print(_("Winning model: %d (\"%s\")") % (match_index, models[model_indexes[match_index]]["label"]))
 
 			# Make snapshot if enabled
 			if save_successful:
@@ -362,6 +418,20 @@ while True:
 			# Run rubberstamps if enabled
 			if config.getboolean("rubberstamps", "enabled", fallback=False):
 				import rubberstamps
+
+				# Rubberstamps use dlib for face landmark tracking when the
+				# DNN pipeline is enabled those models are initialized here,
+				# so they don't slow down the authentication itself
+				if use_dnn:
+					print(_("NOTICE: Rubberstamps run on dlib and are not hardware accelerated"))
+
+					if not os.path.isfile(paths_factory.shape_predictor_5_face_landmarks_path()) or (use_cnn and not os.path.isfile(paths_factory.mmod_human_face_detector_path())):
+						print(_("Dlib data files have not been downloaded, skipping rubberstamps"))
+						print("\n\tcd " + paths_factory.dlib_data_dir_path())
+						print("\tsudo ./install.sh\n")
+					else:
+						face_detector = dlib.cnn_face_detection_model_v1(paths_factory.mmod_human_face_detector_path()) if use_cnn else dlib.get_frontal_face_detector()
+						pose_predictor = dlib.shape_predictor(paths_factory.shape_predictor_5_face_landmarks_path())
 
 				send_to_ui("S", "")
 
