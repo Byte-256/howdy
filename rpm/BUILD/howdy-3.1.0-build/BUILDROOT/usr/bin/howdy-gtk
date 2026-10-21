@@ -1,0 +1,3 @@
+#!/bin/sh
+
+/usr/bin/python3 "/usr/lib/python3.14/site-packages/howdy-gtk/init.py" "$@"
