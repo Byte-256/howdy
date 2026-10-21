@@ -52,7 +52,7 @@ case "$MODE" in
 	apt-get update
 	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
 		git build-essential meson ninja-build pkg-config patchelf ca-certificates \
-		curl tar gzip sha256sum libpam0g-dev libevdev-dev libinih-dev python3-dev \
+		curl tar gzip coreutils libpam0g-dev libevdev-dev libinih-dev python3-dev \
 		locales
 	locale-gen en_US.UTF-8 || true
 	exit 0
